@@ -1,5 +1,5 @@
 /node_modules/
 /public/build/
-/data/maps/*
+/data
 
 .DS_Store

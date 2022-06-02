@@ -12,19 +12,28 @@ const readdir = util.promisify(fs.readdir);
 const SETTINGS = {
 	SPACES_FOLDER: path.join(__dirname, '../data/spaces'),
 	MAPS_FOLDER: path.join(__dirname, '../data/maps'),
-	RANDOM_SEED: "splonktime"
+	RANDOM_SEED: "splonktime",
+	FLOAT_PRECISION: 4
 };
 
 const seed = cyrb128(SETTINGS.RANDOM_SEED);
 const random = sfc32(...seed);
+
+class Packer {
+	constructor({dimensions, pack}) {
+		this.dimensions = dimensions;
+		this.pack = (vMap) => pack(this, vMap);
+	}
+}
 
 const ELEMENT_PACKERS = {
 	OUTER_WALL: new Packer({
 		// 50 Wall Nodes: 50x(x, y)
 		dimensions: 50 * 2,
 		pack: (self, vectorMap) => {
-			let outerWallFlatVector = vectorMap.elements.outerWall.toPoints().map(p => [p.x / vectorMap.width, p.y / vectorMap.height]).flat();
+			let outerWallFlatVector = vectorMap.elements.outerWall.toPoints();
 			outerWallFlatVector = adjustPointsToTargetAmount(outerWallFlatVector, self.dimensions);
+			outerWallFlatVector = outerWallFlatVector.map(p => [p.x / vectorMap.width, p.y / vectorMap.height]).flat();
 			return outerWallFlatVector;
 		}
 	}),
@@ -101,7 +110,7 @@ const ELEMENT_CURATIONS = {
 
 	const spaceName = `${gameMode}-${elementsTemplate}-${sources.join("-")}`;
 
-	try { fs.unlinkSync(`${SETTINGS.SPACES_FOLDER}/${spaceName}.json`); } catch(e) { console.log(e) }
+	try { fs.unlinkSync(`${SETTINGS.SPACES_FOLDER}/${spaceName}.json`); } catch(e) {  }
 	const fileStream = fs.createWriteStream(`${SETTINGS.SPACES_FOLDER}/${spaceName}.json`, {flags: 'a'});
 
 	let mapFilePaths = [];
@@ -131,24 +140,30 @@ const ELEMENT_CURATIONS = {
 
 	progressBar.start(mapFilePaths.length, 1);
 	for (let i = 0; i < mapFilePaths.length; i++) {
-		const tileMap = TPMI.MapUtilities.fileToTileMap(mapFilePaths[i]);
-		const vectorMap = TPMI.Vectorizer.createVectorMapFromTileMap(tileMap);
-		const flags = TPMI.VectorUtilities.getFlagPair(vectorMap.flags);
+		try {
+			const tileMap = await TPMI.MapUtilities.fileToTileMap(mapFilePaths[i]);
+			const vectorMap = TPMI.Vectorizer.createVectorMapFromTileMap(tileMap);
+			const flags = TPMI.VectorUtilities.getFlagPair(vectorMap.elements.flags);
 
-		if(flags[0] === null) continue;
-		if(flags[0].team === TPMI.CONSTANTS.TEAMS.NONE && gameMode !== "NF") continue;
-		if(flags[0].team === TPMI.CONSTANTS.TEAMS.RED && gameMode !== "CTF") continue;
+			if(flags[0] === null) continue;
+			if(flags[0].team === TPMI.CONSTANTS.TEAMS.NONE && gameMode !== "NF") continue;
+			if(flags[0].team === TPMI.CONSTANTS.TEAMS.RED && gameMode !== "CTF") continue;
 
-		let mapVector = [];
+			let mapVector = [];
 
-		for (let i = 0; i < curationElements.length; i++) {
-			const packer = ELEMENT_PACKERS[curationElements[i]];
+			for (let i = 0; i < curationElements.length; i++) {
+				const packer = ELEMENT_PACKERS[curationElements[i]];
 
-			mapVector = mapVector.concat(packer.pack(vectorMap));
+				mapVector = mapVector.concat(packer.pack(vectorMap));
+			}
+
+			mapVector = mapVector.map(n => toPrecision(n, SETTINGS.FLOAT_PRECISION));
+
+			let dataString = JSON.stringify(mapVector);
+			fileStream.write(`${dataString}${i !== mapFilePaths.length - 1 ? "," : ""}\n`);
+		} catch (e) {
+			logger(`An error occurred while processing map "${mapFilePaths[i]}":`, e);
 		}
-
-		let dataString = JSON.stringify(mapVector);
-		fileStream.write(`${dataString}${i !== mapFilePaths.length - 1 ? "," : ""}\n`);
 
 		progressBar.increment();
 
@@ -164,13 +179,14 @@ const ELEMENT_CURATIONS = {
 })();
 
 function adjustPointsToTargetAmount(points, targetPoints) {
-	points = points.map(p => TPMI.Flatten.point(p));
+	points = points.map(p => TPMI.Flatten.point(p.x, p.y));
+	const getP = i => points.at(i % points.length);
 
 	if(points.length > targetPoints) {
 		let pointAreas = [];
 		let amountOfPointsToRemove = points.length - targetPoints;
 		for (let i = 0; i < points.length; i++) {
-			pointAreas.push({idx: i, area: triangleArea(points.at(i-1), points[i], points.at(i+1))});
+			pointAreas.push({idx: i, area: triangleArea(getP(i-1), getP(i), getP(i+1))});
 		}
 
 		pointAreas = pointAreas.sort((a, b) => a.area - b.area);
@@ -182,13 +198,13 @@ function adjustPointsToTargetAmount(points, targetPoints) {
 		let pointDistances = [];
 		let amountOfPointsToAdd = targetPoints - points.length;
 		for (let i = 0; i < points.length; i++) {
-			pointDistances.push({idx: i, dist: TPMI.Utilities.distanceBetween(points.at(i), points.at(i+1))});
+			pointDistances.push({idx: i, dist: TPMI.Utilities.distanceBetween(getP(i), getP(i+1))});
 		}
 
 		pointDistances = pointDistances.sort((a, b) => b.dist - a.dist);
 
 		for (let i = amountOfPointsToAdd - 1; i >= 0; i--) {
-			points.splice(pointDistances[i].idx, 0, midpoint(points.at(i), points.at(i+1)));
+			points.splice(pointDistances[i % pointDistances.length].idx, 0, midpoint(getP(i), getP(i+1)));
 		}
 	}
 
@@ -205,13 +221,6 @@ function midpoint(p1, p2) {
 
 function logger(...args) {
 	console.log(`[${new Date().toLocaleTimeString()}]`, ...args);
-}
-
-class Packer {
-	constructor({dimensions, pack}) {
-		this.dimensions = dimensions;
-		this.pack = (vMap) => pack(this, vMap);
-	}
 }
 
 function cyrb128(str) {
@@ -243,4 +252,8 @@ function sfc32(a, b, c, d) {
 		c = c + t | 0;
 		return (t >>> 0) / 4294967296;
 	}
+}
+
+function toPrecision(num, decimalPlaces) {
+	return Math.round(num * (10 ** decimalPlaces)) / (10 ** decimalPlaces);
 }
