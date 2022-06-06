@@ -36,7 +36,7 @@ const ELEMENT_PACKERS = {
 		numberOfElements: 50,
 		pack: (self, vectorMap) => {
 			let outerWallVector = vectorMap.elements.outerWall.toPoints();
-			outerWallVector = adjustPointsToTargetAmount(outerWallVector, self.dimensions);
+			outerWallVector = adjustPointsToTargetAmount(outerWallVector, self.numberOfElements);
 			outerWallVector = outerWallVector.map(p => [p.x / vectorMap.width, p.y / vectorMap.height]).flat();
 			return outerWallVector;
 		}
@@ -48,7 +48,16 @@ const ELEMENT_PACKERS = {
 		pack: (self, vectorMap) => {
 			const centerPoint = TPMI.Flatten.point(vectorMap.width / 2, vectorMap.height / 2);
 			// Sort by closest distance to center
-			let islandPoints = vectorMap.elements.islands.sort((a, b) => {
+			let islandPoints = vectorMap.elements.islands;
+
+			if(islandPoints.length > self.numberOfElements) {
+				islandPoints = islandPoints.sort((a, b) => {
+					return b.shape.area() - a.shape.area();
+				});
+				islandPoints = islandPoints.slice(0, self.numberOfElements);
+			}
+
+			islandPoints = islandPoints.sort((a, b) => {
 				return a.shape.distanceTo(centerPoint)[0] - b.shape.distanceTo(centerPoint)[0]
 			});
 			islandPoints = islandPoints.map(i => i.toPoints());
@@ -57,8 +66,9 @@ const ELEMENT_PACKERS = {
 				islandPoints.map(island => island.map(p => [p.x / vectorMap.width, p.y / vectorMap.height]).flat()),
 				self.numberOfElements,
 				Array(16).fill(0).map(p => [centerPoint.x, centerPoint.y]).flat()
-			).flat();
-			return islandPoints;
+			);
+
+			return islandPoints.flat();
 		}
 	}),
 	BOOSTS: new Packer({
@@ -73,6 +83,7 @@ const ELEMENT_PACKERS = {
 			});
 			boostPoints = boostPoints.map(b => [b.shape.x / vectorMap.width, b.shape.y / vectorMap.height, teamToNumber(b.team)]);
 			boostPoints = markElementsExistence(boostPoints, self.numberOfElements, [centerPoint.x, centerPoint.y, 0.5]).flat();
+
 			return boostPoints;
 		}
 	}),
@@ -222,8 +233,8 @@ const ELEMENT_CURATIONS = {
 
 		try {
 			const tileMap = await TPMI.MapUtilities.fileToTileMap(mapFilePaths[i]);
-			
-			const vectorMap = TPMI.Vectorizer.createVectorMapFromTileMap(tileMap);
+
+			let vectorMap = TPMI.Vectorizer.createVectorMapFromTileMap(tileMap);
 			if(vectorMap.width < 10 || vectorMap.height < 10) continue;
 
 			const flags = TPMI.VectorUtilities.getFlagPair(vectorMap.elements.flags);
@@ -232,15 +243,19 @@ const ELEMENT_CURATIONS = {
 			if(flags[0].team === TPMI.CONSTANTS.TEAMS.RED && gameMode !== "CTF") continue;
 
 			const symmetry = TPMI.Analyzer.detectVectorMapSymmetry.closest(vectorMap);
-
-			console.log(symmetry);
-
+			vectorMap = TPMI.Vectorizer.sliceMap(vectorMap, symmetry);
+			
 			let mapVector = [];
 
 			for (let i = 0; i < curationElements.length; i++) {
 				const packer = ELEMENT_PACKERS[curationElements[i]];
+				const packed = packer.pack(vectorMap);
 
-				mapVector = mapVector.concat(packer.pack(vectorMap));
+				if(packed.length !== packer.dimensions) {
+					throw new Error(`INCONSISTENT ${curationElements[i]} PACKER DIMENSIONS: ${packed.length} !== ${packer.dimensions}`);
+				}
+
+				mapVector = mapVector.concat(packed);
 			}
 
 			mapVector = mapVector.map(n => toPrecision(n, SETTINGS.FLOAT_PRECISION));
@@ -271,10 +286,12 @@ function adjustPointsToTargetAmount(points, targetPoints) {
 		let pointAreas = [];
 		let amountOfPointsToRemove = points.length - targetPoints;
 		for (let i = 0; i < points.length; i++) {
-			pointAreas.push({idx: i, area: triangleArea(getP(i-1), getP(i), getP(i+1))});
+			pointAreas.push({idx: i, area: TPMI.Flatten.polygon([getP(i-1), getP(i), getP(i+1)]).area()});
 		}
 
-		pointAreas = pointAreas.sort((a, b) => a.area - b.area);
+		pointAreas = pointAreas.sort((a, b) => a.area - b.area)
+			.slice(0, amountOfPointsToRemove)
+			.sort((a, b) => a.idx - b.idx);
 
 		for (let i = amountOfPointsToRemove - 1; i >= 0; i--) {
 			points.splice(pointAreas[i].idx, 1);
@@ -286,28 +303,47 @@ function adjustPointsToTargetAmount(points, targetPoints) {
 			pointDistances.push({idx: i, dist: TPMI.Utilities.distanceBetween(getP(i), getP(i+1))});
 		}
 
-		pointDistances = pointDistances.sort((a, b) => b.dist - a.dist);
+		pointDistances = pointDistances.sort((a, b) => b.dist - a.dist)
+			.slice(0, amountOfPointsToAdd)
+			.sort((a, b) => a.idx - b.idx);
 
 		for (let i = amountOfPointsToAdd - 1; i >= 0; i--) {
-			points.splice(pointDistances[i % pointDistances.length].idx, 0, midpoint(getP(i), getP(i+1)));
+			const pIdx = pointDistances[i % pointDistances.length].idx;
+			points.splice(pIdx, 0, midpoint(getP(pIdx), getP(pIdx+1)));
 		}
 	}
 
 	return points;
 }
 
+function shuffle(array) {
+	let currentIndex = array.length,  randomIndex;
+
+	// While there remain elements to shuffle.
+	while (currentIndex !== 0) {
+		// Pick a remaining element.
+		randomIndex = Math.floor(Math.random() * currentIndex);
+		currentIndex--;
+
+		// And swap it with the current element.
+		[array[currentIndex], array[randomIndex]] = [
+			array[randomIndex], array[currentIndex]
+		];
+	}
+
+	return array;
+}
+
 function markElementsExistence(elements, targetElementAmount, defaultElement=["No Default Element"]) {
 	let existenceMarked = elements.map(e => [1].concat(e));
 	defaultElement = [0].concat(defaultElement);
 
-	if(targetElementAmount > existenceMarked.length) {
-		existenceMarked = existenceMarked.concat(
-			duplicateArrayElementsToAmount(existenceMarked, targetElementAmount, defaultElement, elem => {
-				elem[0] = 0;
-				return elem;
-			})
-		);
-	} else if(targetElementAmount < existenceMarked.length) {
+	if(existenceMarked.length < targetElementAmount) {
+		existenceMarked = duplicateArrayElementsToAmount(existenceMarked, targetElementAmount, defaultElement, elem => {
+			elem[0] = 0;
+			return elem;
+		})
+	} else if(existenceMarked.length > targetElementAmount) {
 		existenceMarked = existenceMarked.slice(0, targetElementAmount);
 	}
 
@@ -337,7 +373,7 @@ function teamToNumber(team) {
 }
 
 function triangleArea(p1, p2, p3) {
-	return ((p1.x * (p2.y - p3.y)) + (p2.x * (p3.y - p1.y)) + (p3.x * (p1.y - p2.y))) / 2;
+	return 0.5 * ((p1.x * (p2.y - p3.y)) + (p2.x * (p3.y - p1.y)) + (p3.x * (p1.y - p2.y)));
 }
 
 function midpoint(p1, p2) {

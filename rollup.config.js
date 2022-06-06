@@ -2,6 +2,7 @@ import svelte from 'rollup-plugin-svelte';
 import commonjs from '@rollup/plugin-commonjs';
 import resolve from '@rollup/plugin-node-resolve';
 import livereload from 'rollup-plugin-livereload';
+import webWorkerLoader from 'rollup-plugin-web-worker-loader';
 import { terser } from 'rollup-plugin-terser';
 import css from 'rollup-plugin-css-only';
 
@@ -58,9 +59,11 @@ export default {
 		}),
 		commonjs(),
 
+		webWorkerLoader(),
+
 		// In dev mode, call `npm run start` once
 		// the bundle has been generated
-		!production && serve(),
+		// !production && serve(),
 
 		// Watch the `public` directory and refresh the
 		// browser on changes when not in production
